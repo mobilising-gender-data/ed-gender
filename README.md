@@ -49,11 +49,11 @@ comparable with a full run.
 On Eddie (Univa Grid Engine):
 
 ```bash
-qsub code/job_full.sge        # 01_stops.R, 16 slots x 4G, ~20 min
+qsub code/job_stops.sge        # 01_stops.R, 16 slots x 4G, ~20 min
 qsub code/job_places.sge      # 02_places.py, 16 slots x 8G (memory, not cores)
 ```
 
-`job_full.sge` refuses to run while `ONLY_BUCKETS` is set to a pilot value.
+`job_stops.sge` refuses to run while `ONLY_BUCKETS` is set to a pilot value.
 `job_places.sge` refuses to run without a full `output/stops.csv`.
 
 ## Environment

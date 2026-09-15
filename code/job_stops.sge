@@ -1,8 +1,8 @@
 #!/bin/bash
 # =============================================================================
-# job_full.sge — Univa Grid Engine: full 16-bucket run of 01_stops.R
+# job_stops.sge — Univa Grid Engine: full 16-bucket run of 01_stops.R
 #
-#   qsub code/job_full.sge
+#   qsub code/job_stops.sge
 #
 # DO NOT SUBMIT THIS BEFORE job_pilot.sge HAS RUN. It exists to answer one
 # question — how does 02_places.py (Infostop) scale here — and that answer
