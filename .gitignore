@@ -1,0 +1,32 @@
+# data and results
+data/
+output/
+logs/
+*.rds
+*.csv
+*.parquet
+*.gpkg
+
+# working notes
+code/01_stops_notes.txt
+
+# python venv and machine-specific env
+.venv-ed/
+code/env.sh
+__pycache__/
+*.pyc
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+.rtmp/
+
+# scheduler output
+*.o[0-9]*
+*.po[0-9]*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.bak

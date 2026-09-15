@@ -1,0 +1,90 @@
+#!/bin/bash
+# =============================================================================
+# job_full.sge — Univa Grid Engine: full 16-bucket run of 01_stops.R
+#
+#   qsub code/job_full.sge
+#
+# DO NOT SUBMIT THIS BEFORE job_pilot.sge HAS RUN. It exists to answer one
+# question — how does 02_places.py (Infostop) scale here — and that answer
+# decides whether running all 16 buckets is even worth doing yet. If the pilot
+# took hours on ~989k points, running the full extract into a stage that
+# cannot finish just burns the allocation. See code/HPC.md.
+#
+# WHAT THIS JOB ACTUALLY PARALLELISES
+# data.table's own multithreading (N_THREADS / setDTthreads) speeds up its
+# internal C routines — sorting, fread, built-in aggregations — but NOT the
+# stop-detection loop, which dispatches a custom R function per user and
+# always runs on one core no matter the thread count. So with -pe smp 16 alone,
+# most cores would sit idle for the expensive part of this script.
+#
+# 01_stops.R now forks one WORKER PER SLOT across BUCKETS instead — buckets
+# share no users, so this needs no locking and gives bit-identical output to
+# running them one at a time (verified: row-for-row identical on synthetic
+# data, both sequential and 4-way parallel). See BUCKET_WORKERS in
+# 01_stops.R for the mechanism and the fork-safety handling.
+# =============================================================================
+
+#$ -N ed-full
+#$ -S /bin/bash
+#$ -cwd
+#$ -j y
+#$ -o logs/
+
+# 16 slots x 4G, per-slot (confirmed at this site) = 64G total.
+#$ -pe sharedmem 16
+#$ -l h_vmem=4G
+
+# 16 buckets x ~4-5 min each (measured on the pilot, single-threaded) would be
+# ~70 min sequential; parallel across 16 workers should be closer to one
+# bucket's wall time plus overhead. 3h is generous headroom, not an estimate.
+#$ -l h_rt=03:00:00
+
+set -euo pipefail
+mkdir -p logs
+
+echo "host      : $(hostname)"
+echo "job       : ${JOB_ID:-?}  slots: ${NSLOTS:-?}"
+echo "started   : $(date)"
+
+export OMP_NUM_THREADS="${NSLOTS:-1}"
+export TMPDIR="${TMPDIR:-/scratch/$USER/tmp}"
+mkdir -p "$TMPDIR"
+echo "tmpdir    : $TMPDIR"
+. /etc/profile.d/modules.sh
+# If the pilot showed 4G/slot is tight (OOM within the first bucket rather
+# than partway through several — see the h_vmem note below), lower this
+# BEFORE lowering -pe smp: fewer workers at full memory each beats more
+# workers fighting over the same total.
+# export BUCKET_WORKERS=8
+
+module load R/4.6           || echo "WARNING: no R module; using whatever is on PATH"
+module load igmm/apps/python/3.10.14 || echo "WARNING: no python/3.10 module"
+#module load java/17     || echo "WARNING: no java/17 module"
+
+if [ -f code/env.sh ]; then
+  # shellcheck disable=SC1091
+  source code/env.sh
+else
+  echo "ERROR: code/env.sh missing. Run 'bash code/setup_python.sh' on a login node first."
+  exit 1
+fi
+
+# --- CONFIRM 01_stops.R IS SET TO PROCESS ALL BUCKETS ------------------------
+# ONLY_BUCKETS <- c("0") from the pilot must be reset to NULL, or this job
+# does exactly what job_pilot.sge already did.
+if ! grep -qE '^ONLY_BUCKETS *<- *NULL' code/01_stops.R; then
+  echo "ERROR: code/01_stops.R does not have 'ONLY_BUCKETS <- NULL'."
+  echo "  It is probably still set to the pilot's single bucket. Fix that line"
+  echo "  and resubmit — refusing to silently re-run just bucket 0."
+  exit 1
+fi
+
+echo
+echo "=== 01_stops.R — all 16 buckets, BUCKET_WORKERS defaults to \$NSLOTS ==="
+Rscript code/01_stops.R
+
+echo
+echo "finished  : $(date)"
+echo "output    : output/stops.rds / output/stops.csv"
+echo "next      : source code/env.sh; python code/02_places.py"
+echo "            (full-scale — pilot showed how this step scales here)"

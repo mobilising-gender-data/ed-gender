@@ -1,0 +1,104 @@
+#!/bin/bash
+# =============================================================================
+# job_places.sge — Eddie (UGE): 02_places.py (Infostop stage 2) on the FULL extract
+#
+#   qsub code/job_places.sge
+#   qstat -u $USER
+#
+# Standalone: 01_stops.R has already run (job 57604231, 10 Aug 2026), so this
+# reads output/stops.csv off disk and recomputes nothing.
+#
+# ONE CORE IS USED; 16 SLOTS ARE REQUESTED FOR MEMORY.
+# Infomap's community detection is effectively single-threaded. h_vmem is
+# per-slot on Eddie, so 16 x 8G is how we reach 128G. Fifteen cores idle —
+# deliberate.
+#
+# WHY THIS STEP CANNOT BE BUCKETED
+# The point of Infostop is a place label shared ACROSS users. Per-bucket runs
+# would give 16 independent label spaces for the same cafe.
+#
+# SCALING FROM THE PILOT (measured, then extrapolated)
+#   pilot (bucket 0):  1,266,049 stops -> 989,213 distinct points
+#                      11 min 18 s, peak RSS 9.4 GB
+#   full (16 buckets): 20,447,531 stops (~16x)
+# Distinct points will grow by less than 16x because places saturate, but by
+# how much is unmeasured, so memory assumes roughly linear (~128 GB) and the
+# wall time allows for Infomap being superlinear.
+#
+# CHECKPOINT. Within the first minute the log prints
+#     deduplicated N stop medians -> M distinct points
+# If M is very large (> ~10M), qdel the job and raise DEDUP_RESOLUTION_DEG in
+# 02_places.py from 1e-5 (~1.1 m) to 1e-4 (~11 m). Still far below R2 (50 m),
+# so it cannot merge places that would otherwise be distinct.
+# =============================================================================
+
+#$ -N ed-places
+#$ -S /bin/bash
+#$ -cwd
+#$ -j y
+#$ -o logs/
+
+# 16 slots x 8G per slot = 128G total.
+#$ -pe sharedmem 16
+#$ -l h_vmem=8G
+
+# Pilot was 11 min on 1/16 of the data. Linear would be ~3 h; Infomap is
+# usually worse than linear. If this hits the wall clock, that IS the result —
+# go to the mitigations in HPC.md rather than resubmitting with a bigger number.
+#$ -l h_rt=24:00:00
+
+set -euo pipefail
+mkdir -p logs
+
+echo "host      : $(hostname)"
+echo "job       : ${JOB_ID:-?}  slots: ${NSLOTS:-?}"
+echo "started   : $(date)"
+
+# Infomap ignores this; numpy's BLAS does not, and we are holding the slots.
+export OMP_NUM_THREADS="${NSLOTS:-1}"
+
+export TMPDIR="${TMPDIR:-/scratch/$USER/tmp}"
+mkdir -p "$TMPDIR"
+echo "tmpdir    : $TMPDIR"
+
+. /etc/profile.d/modules.sh
+module load igmm/apps/python/3.10.14 || echo "WARNING: no python/3.10 module"
+
+if [ -f code/env.sh ]; then
+  # shellcheck disable=SC1091
+  source code/env.sh
+else
+  echo "ERROR: code/env.sh missing. Run 'bash code/setup_python.sh' on a login node first."
+  exit 1
+fi
+
+if [ ! -x .venv-ed/bin/python ]; then
+  echo "ERROR: .venv-ed/bin/python not found. Run 'bash code/setup_python.sh' on a login node first."
+  exit 1
+fi
+
+# --- REFUSE TO RUN ON THE PILOT'S OUTPUT -------------------------------------
+# 02_places.py defaults to output/stops.csv, which only exists after a FULL
+# 01_stops.R run (the pilot writes stops_pilot.csv).
+if [ ! -s output/stops.csv ]; then
+  echo "ERROR: output/stops.csv missing or empty."
+  echo "  01_stops.R must have completed with ONLY_BUCKETS <- NULL."
+  exit 1
+fi
+echo "stops in  : $(wc -l < output/stops.csv) lines"
+
+# /usr/bin/time -v reports wall clock and peak RSS — the measurement needed to
+# size this properly next time. Fall back to plain execution if it is absent.
+TIMECMD=""
+if [ -x /usr/bin/time ]; then TIMECMD="/usr/bin/time -v"; fi
+
+echo
+echo "=== 02_places.py — Infostop stage 2, ALL users at once ==="
+$TIMECMD .venv-ed/bin/python code/02_places.py
+
+echo
+echo "finished  : $(date)"
+echo "output    : output/stop_places.parquet / output/places.parquet"
+echo "next      : qsub code/job_howde.sge"
+echo
+echo "RECORD THE ELAPSED TIME AND PEAK RSS ABOVE in code/HPC.md."
