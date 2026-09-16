@@ -27,9 +27,11 @@
 #
 # CHECKPOINT. Within the first minute the log prints
 #     deduplicated N stop medians -> M distinct points
-# If M is very large (> ~10M), qdel the job and raise DEDUP_RESOLUTION_DEG in
-# 02_places.py from 1e-5 (~1.1 m) to 1e-4 (~11 m). Still far below R2 (50 m),
-# so it cannot merge places that would otherwise be distinct.
+# MEASURED 2026-09-15 (job 58657143): at DEDUP_RESOLUTION_DEG = 1e-5, the full
+# run gave M = 11,479,068 and was killed at 128 GB (exit 137) — so ~10M points
+# is over the limit at this memory. DEDUP_RESOLUTION_DEG is now 1e-4 (~11 m),
+# still far below R2 (50 m). If M is still above ~8M, qdel and go to the
+# per-H3-cell clustering option in HPC.md rather than asking for more memory.
 # =============================================================================
 
 #$ -N ed-places

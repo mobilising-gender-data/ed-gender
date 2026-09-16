@@ -40,6 +40,23 @@ EXCLUDE_DATES <- as.Date(c("2024-08-26", "2024-09-16"))
 BBOX <- list(lat_min = 55.70, lat_max = 56.10,
              lon_min = -3.50, lon_max = -2.90)
 
+# Pings whose lat AND lon both have this many decimals or fewer are dropped as
+# coarse-location fallbacks (see the filter for why). NULL disables.
+COARSE_MAX_DECIMALS <- 4
+
+# Known fallback centroids (4-dp lat/lon), derived from the unfiltered 10 Aug
+# 2026 run: every coordinate shared by >= 100 users that passed the precision
+# test above. Pings that ROUND to one of these are dropped too, which catches
+# variants perturbed by < 1 m. Missing file = this test is skipped.
+COARSE_CENTROIDS_FILE <- "code/coarse_fallback_coords.csv"
+COARSE_KEYS <- if (file.exists(COARSE_CENTROIDS_FILE)) {
+  cc <- fread(COARSE_CENTROIDS_FILE)
+  sprintf("%.4f,%.4f", cc$lat4, cc$lon4)
+} else {
+  message("NOTE: ", COARSE_CENTROIDS_FILE, " not found; known-centroid test skipped.")
+  character(0)
+}
+
 MAX_SPEED_KMH      <- 200   # spike filter: implied speed above this is impossible
 DIST_THRESH_M      <- 200   # max distance from cluster reference point
 MAX_GAP_MIN        <- 240   # silence longer than this closes a stop
@@ -115,6 +132,23 @@ haversine_m <- function(lat1, lon1, lat2, lon2) {
   dlon <- (lon2 - lon1) * to_rad
   a <- sin(dlat / 2)^2 + cos(lat1 * to_rad) * cos(lat2 * to_rad) * sin(dlon / 2)^2
   2 * R * asin(pmin(1, sqrt(a)))
+}
+
+# Round a double to the nearest single-precision (float32) value. Some fallback
+# coordinates reach us after a float32 round-trip (55.9632 -> 55.96319961), so
+# a plain decimal-count test misses them.
+to_float32 <- function(x) {
+  e <- floor(log2(abs(x)))
+  ulp <- 2^(e - 23)
+  round(x / ulp) * ulp
+}
+
+# TRUE if x is a COARSE_MAX_DECIMALS-decimal value, either exactly or as its
+# float32 rendering. Genuine fixes carry 5-7 decimals and essentially never
+# satisfy either test.
+is_coarse_coord <- function(x, dp = COARSE_MAX_DECIMALS, tol = 2e-8) {
+  r <- round(x, dp)
+  abs(x - r) < 1e-9 | abs(x - to_float32(r)) < tol
 }
 
 # Sequential stay-point detection for one user (pings sorted by time). Grow a
@@ -218,6 +252,28 @@ process_bucket <- function(path) {
   dt <- dt[LATITUDE  >= BBOX$lat_min & LATITUDE  <= BBOX$lat_max &
              LONGITUDE >= BBOX$lon_min & LONGITUDE <= BBOX$lon_max]
   count("after bounding-box filter", nrow(dt))
+
+  # -- coarse-location filter. Coordinates with <= COARSE_MAX_DECIMALS decimals
+  #    (exactly, or after a float32 round-trip) are OS area fallbacks: one fixed
+  #    point per district, shared by tens of thousands of users, not GPS fixes.
+  #    Found 2026-09-15: 43 such points held 24% of all pings; 22% of users had
+  #    nothing else. See 01_stops_notes.txt section C.
+  #    Two tests, both applied: (a) the value is a 4-dp number exactly or via
+  #    float32; (b) the ping rounds to a centroid in COARSE_CENTROIDS_FILE — a
+  #    third variant reaches us perturbed by under a metre (a projection
+  #    round-trip), which only a known-point match can catch.
+  if (!is.null(COARSE_MAX_DECIMALS)) {
+    is_coarse <- is_coarse_coord(dt$LATITUDE) & is_coarse_coord(dt$LONGITUDE)
+    near_known <- if (length(COARSE_KEYS)) {
+      sprintf("%.4f,%.4f", dt$LATITUDE, dt$LONGITUDE) %in% COARSE_KEYS
+    } else rep(FALSE, nrow(dt))
+    n_users_pre <- uniqueN(dt$registration_id)
+    count("pings dropped: coarse-location fallback", sum(is_coarse))
+    count("pings dropped: near known fallback centroid", sum(near_known & !is_coarse))
+    dt <- dt[!(is_coarse | near_known)]
+    count("users with only coarse pings (removed)", n_users_pre - uniqueN(dt$registration_id))
+    count("after coarse-location filter", nrow(dt))
+  }
 
   dt <- unique(dt, by = c("registration_id", "DATETIME", "LATITUDE", "LONGITUDE"))
   count("after removing exact duplicate pings", nrow(dt))

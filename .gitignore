@@ -6,6 +6,7 @@ logs/
 *.csv
 *.parquet
 *.gpkg
+!code/coarse_fallback_coords.csv
 
 # working notes
 code/01_stops_notes.txt

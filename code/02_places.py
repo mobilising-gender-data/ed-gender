@@ -7,6 +7,7 @@ chained SAME_PLACE_M merge and the H3-cell proxy that 02_routines.R used.
 
     python code/02_places.py                    # full run
     python code/02_places.py --limit-users 13000 --out-suffix _pilot
+    python code/02_places.py --dedup-deg 1e-5 --out-suffix _dedup1e5   # needs ~512 GB
 
 WHY THIS STEP IS NOT BUCKETED
 Every other ping-level stage fans out over user buckets. This one must not.
@@ -60,7 +61,11 @@ R2_METRES = 50.0
 # would otherwise be distinct.
 #
 # Set to 0 to disable and cluster every stop median individually.
-DEDUP_RESOLUTION_DEG = 1e-5
+#
+# 2026-09-15: raised from 1e-5 to 1e-4 (~11 m). At 1e-5 the full run gave
+# 11,479,068 distinct points from 20.4M stops and was killed at 128 GB
+# (Eddie job 58657143, exit 137). Still far below R2_METRES.
+DEDUP_RESOLUTION_DEG = 1e-4
 
 # MUST STAY TRUE.
 #
@@ -202,8 +207,9 @@ def report(df: pd.DataFrame, places: pd.DataFrame) -> None:
 
 
 def main() -> None:
-    global STOPS_CSV
-    ap = argparse.ArgumentParser(description=__doc__)
+    global STOPS_CSV, DEDUP_RESOLUTION_DEG
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--limit-users", type=int, default=None,
                     help="pilot on the first N users (place ids are then not "
                          "comparable with a full run)")
@@ -214,9 +220,13 @@ def main() -> None:
     ap.add_argument("--allow-singleton-noise", action="store_true",
                     help="run with label_singleton=False, permitting -1 labels. "
                          "ONLY for the A/B test — HoWDe drops loc == -1 silently.")
+    ap.add_argument("--dedup-deg", type=float, default=DEDUP_RESOLUTION_DEG,
+                    help=f"pre-clustering grid in degrees (default {DEDUP_RESOLUTION_DEG}; "
+                         "1e-5 needs ~10x the memory of 1e-4 at full scale; 0 disables)")
     args = ap.parse_args()
 
     STOPS_CSV = Path(args.stops_csv)
+    DEDUP_RESOLUTION_DEG = args.dedup_deg
 
     df = load_stops(args.limit_users)
     df["place_id"] = cluster_places(
