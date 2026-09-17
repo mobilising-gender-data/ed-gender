@@ -1,0 +1,130 @@
+#!/bin/bash
+# =============================================================================
+# job_howde.sge — Eddie (UGE): 03_howde.py (HoWDe home/work detection), full run
+#
+#   qsub code/job_howde.sge
+#   qstat -u $USER
+#
+# Run AFTER job_places.sge: reads output/stops.csv and output/stop_places.parquet.
+#
+# This is the cheap step. The pilot ran HoWDe over 1.27M stops in 41 s with a
+# peak RSS of 0.7 GB; the full run is ~14x that, so minutes and a few GB. The
+# request below is dominated by JVM headroom, not by the work.
+#
+# THREE THINGS THAT BREAK THIS STEP, ALL SPARK-RELATED
+#
+# 1. JAVA. Spark 4.2 needs JDK 17 or 21. Every Eddie node has a system java,
+#    so no module is loaded; but env.sh sets JAVA_HOME itself and may carry a
+#    path from another machine. This file validates the JDK before handing
+#    over — falling back to the java on PATH if env.sh's is not runnable —
+#    rather than dying inside Spark with an opaque error.
+#
+# 2. h_vmem LIMITS VIRTUAL MEMORY, AND THE JVM INFLATES IT. Spark reserves a
+#    large virtual address space beyond its resident usage, so SPARK_DRIVER_MEM
+#    is kept well under the total. If it still dies with an opaque JVM error,
+#    raise h_vmem or ask whether m_mem_free / h_rss (resident caps) exist:
+#        qconf -sc | grep -E 'mem|rss'
+#
+# 3. local[*] WOULD GRAB THE WHOLE NODE. SPARK_MASTER is pinned to NSLOTS
+#    below — same trap 01_stops.R avoids by reading NSLOTS, not detectCores().
+# =============================================================================
+
+#$ -N ed-howde
+#$ -S /bin/bash
+#$ -cwd
+#$ -j y
+#$ -o logs/
+
+# 8 slots x 8G per slot = 64G. Far more than the work needs; see note 2.
+#$ -pe sharedmem 8
+#$ -l h_vmem=8G
+
+# Pilot was ~1 min end to end. 4 h is insurance against Spark start-up
+# pathologies on a busy node, not an estimate.
+#$ -l h_rt=04:00:00
+
+set -euo pipefail
+mkdir -p logs
+
+echo "host      : $(hostname)"
+echo "job       : ${JOB_ID:-?}  slots: ${NSLOTS:-?}"
+echo "started   : $(date)"
+
+export OMP_NUM_THREADS="${NSLOTS:-1}"
+
+# Spark spills shuffle data to disk; keep it off node-local /tmp.
+export TMPDIR="${TMPDIR:-/scratch/$USER/tmp}"
+mkdir -p "$TMPDIR"
+export SPARK_LOCAL_DIRS="$TMPDIR"
+echo "tmpdir    : $TMPDIR"
+
+. /etc/profile.d/modules.sh
+module load igmm/apps/python/3.10.14 || echo "WARNING: no python/3.10 module"
+
+# Java is installed on every Eddie node, so no module is loaded. If a module
+# were ever needed:  module load <name from 'module avail java'>
+
+if [ -f code/env.sh ]; then
+  # shellcheck disable=SC1091
+  source code/env.sh
+else
+  echo "ERROR: code/env.sh missing. Run 'bash code/setup_python.sh' on a login node first."
+  exit 1
+fi
+
+# --- VALIDATE THE JDK, DO NOT JUST TRUST JAVA_HOME ---------------------------
+# env.sh may carry a JAVA_HOME from another machine; if it is not runnable,
+# fall back to the java on PATH (the node's system JDK).
+if [ -z "${JAVA_HOME:-}" ] || [ ! -x "${JAVA_HOME}/bin/java" ]; then
+  if command -v java >/dev/null 2>&1; then
+    export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
+    echo "note      : env.sh JAVA_HOME not runnable here; using system java at $JAVA_HOME"
+  fi
+fi
+if [ -z "${JAVA_HOME:-}" ] || [ ! -x "${JAVA_HOME}/bin/java" ]; then
+  echo "ERROR: no runnable java found (JAVA_HOME='${JAVA_HOME:-<unset>}', none on PATH)."
+  echo "  Edit the JAVA_HOME line in code/env.sh to a JDK 17/21 path on this node."
+  exit 1
+fi
+JAVA_VER="$("${JAVA_HOME}/bin/java" -version 2>&1 | head -1)"
+echo "java      : $JAVA_VER"
+echo "java home : $JAVA_HOME"
+case "$JAVA_VER" in
+  *\"17*|*\"21*) ;;
+  *) echo "ERROR: Spark 4.2 needs JDK 17 or 21; this is '$JAVA_VER'."
+     exit 1 ;;
+esac
+
+# --- SPARK SIZING ------------------------------------------------------------
+export SPARK_MASTER="local[${NSLOTS:-1}]"
+export SPARK_DRIVER_MEM="${SPARK_DRIVER_MEM:-16g}"
+echo "spark     : master=$SPARK_MASTER driver_mem=$SPARK_DRIVER_MEM local_dirs=$SPARK_LOCAL_DIRS"
+
+# --- INPUT GUARDS ------------------------------------------------------------
+# Both must be the FULL run's. Mixing a pilot stop_places with full stops would
+# join to place ids from a different label space — silent nonsense, not an error.
+if [ ! -s output/stops.csv ]; then
+  echo "ERROR: output/stops.csv missing or empty (job_stops.sge full run required)."
+  exit 1
+fi
+if [ ! -s output/stop_places.parquet ]; then
+  echo "ERROR: output/stop_places.parquet missing — run job_places.sge first."
+  exit 1
+fi
+
+TIMECMD=""
+if [ -x /usr/bin/time ]; then TIMECMD="/usr/bin/time -v"; fi
+
+echo
+echo "=== 03_howde.py — home and work per user ==="
+$TIMECMD .venv-ed/bin/python code/03_howde.py
+
+echo
+echo "finished  : $(date)"
+echo "output    : output/home_work_stops.parquet / output/home_work.parquet"
+echo
+echo "Sanity check: the log prints the share of users given a home and a work."
+echo "The pilot (on data still containing the coarse-location fallbacks) found"
+echo "home for 23.3% and work for 4.7%. Expect both to differ on the cleaned"
+echo "cohort — a big jump in either direction is worth understanding before"
+echo "trusting it."

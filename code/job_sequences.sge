@@ -1,0 +1,68 @@
+#!/bin/bash
+# =============================================================================
+# job_sequences.sge — Eddie (UGE): 04_sequences.R (anchors + daily sequences)
+#
+#   qsub code/job_sequences.sge                    # full run: home_work.parquet
+#   qsub -v SFX=_fH0.9 code/job_sequences.sge      # a sweep variant
+#
+# Runs AFTER job_howde.sge. Single R process; every step is vectorised
+# data.table, so this scales linearly from the pilot (1.27M stops: 21 s,
+# 0.7 GB) — expect minutes and ~10-15 GB at 17.9M stops. The request is
+# memory headroom, not parallelism.
+#
+# data.table's own threads (sorting, joins, fread/fwrite, group aggregations)
+# are pinned to the allocation via R_DATATABLE_NUM_THREADS; left unset,
+# data.table sizes itself on the whole node.
+# =============================================================================
+
+#$ -N ed-seq
+#$ -S /bin/bash
+#$ -cwd
+#$ -j y
+#$ -o logs/
+
+#$ -pe sharedmem 8
+#$ -l h_vmem=8G
+#$ -l h_rt=02:00:00
+
+set -euo pipefail
+mkdir -p logs
+
+SFX="${SFX:-}"
+
+echo "host      : $(hostname)"
+echo "job       : ${JOB_ID:-?}  slots: ${NSLOTS:-?}"
+echo "started   : $(date)"
+echo "suffix    : '${SFX}'"
+
+export OMP_NUM_THREADS="${NSLOTS:-1}"
+export R_DATATABLE_NUM_THREADS="${NSLOTS:-1}"
+export TMPDIR="${TMPDIR:-/scratch/$USER/tmp}"
+mkdir -p "$TMPDIR"
+
+. /etc/profile.d/modules.sh
+module load R/4.6 || echo "WARNING: no R module; using whatever is on PATH"
+
+# --- INPUT GUARDS ------------------------------------------------------------
+for f in output/stops.rds output/stop_places.parquet output/places.parquet \
+         "output/home_work${SFX}.parquet" \
+         data/land_use_res9_gpt-4o_20260801_024540.csv; do
+  if [ ! -s "$f" ]; then
+    echo "ERROR: missing input $f"
+    exit 1
+  fi
+done
+
+Rscript -e 'suppressPackageStartupMessages(library(arrow)); cat("arrow", as.character(packageVersion("arrow")), "\n")' \
+  || { echo "ERROR: R package 'arrow' not available — install.packages('arrow') on a login node."; exit 1; }
+
+TIMECMD=""
+if [ -x /usr/bin/time ]; then TIMECMD="/usr/bin/time -v"; fi
+
+echo
+echo "=== 04_sequences.R ${SFX} ==="
+$TIMECMD Rscript code/04_sequences.R "$SFX"
+
+echo
+echo "finished  : $(date)"
+echo "output    : output/anchors${SFX}.* output/stop_sequences_long${SFX}.* output/daily_sequences${SFX}.*"

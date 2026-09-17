@@ -1,0 +1,92 @@
+#!/bin/bash
+# =============================================================================
+# job_howde_sweep.sge — Eddie (UGE): 03_howde.py across f_hours_H values
+#
+#   qsub code/job_howde_sweep.sge
+#   F_LIST="0.7 0.9" qsub -v F_LIST code/job_howde_sweep.sge   # custom values
+#
+# Sensitivity of home detection to the f_hours_H threshold: the package
+# default is 0.7; the paper's "maximum" configuration (97% home accuracy,
+# ~39% of users excluded on their data) is 0.9. Each value runs the full
+# cohort and writes its own pair of outputs:
+#
+#   output/home_work_stops_fH<v>.parquet
+#   output/home_work_fH<v>.parquet
+#
+# The unsuffixed outputs from job_howde.sge are untouched. Runs are sequential
+# in one job — each is minutes — so the whole sweep is well under an hour.
+# Same Spark caveats as job_howde.sge (Java 17/21, h_vmem is virtual, master
+# pinned to NSLOTS).
+# =============================================================================
+
+#$ -N ed-howde-sweep
+#$ -S /bin/bash
+#$ -cwd
+#$ -j y
+#$ -o logs/
+
+#$ -pe sharedmem 8
+#$ -l h_vmem=8G
+#$ -l h_rt=04:00:00
+
+set -euo pipefail
+mkdir -p logs
+
+F_LIST="${F_LIST:-0.7 0.75 0.8 0.85 0.9}"
+
+echo "host      : $(hostname)"
+echo "job       : ${JOB_ID:-?}  slots: ${NSLOTS:-?}"
+echo "started   : $(date)"
+echo "f_hours_H : $F_LIST"
+
+export OMP_NUM_THREADS="${NSLOTS:-1}"
+export TMPDIR="${TMPDIR:-/scratch/$USER/tmp}"
+mkdir -p "$TMPDIR"
+export SPARK_LOCAL_DIRS="$TMPDIR"
+
+. /etc/profile.d/modules.sh
+module load igmm/apps/python/3.10.14 || echo "WARNING: no python/3.10 module"
+# Java: every Eddie node has a system JDK; no module loaded (see job_howde.sge).
+
+if [ -f code/env.sh ]; then
+  # shellcheck disable=SC1091
+  source code/env.sh
+else
+  echo "ERROR: code/env.sh missing. Run 'bash code/setup_python.sh' on a login node first."
+  exit 1
+fi
+
+if [ -z "${JAVA_HOME:-}" ] || [ ! -x "${JAVA_HOME}/bin/java" ]; then
+  if command -v java >/dev/null 2>&1; then
+    export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
+    echo "note      : env.sh JAVA_HOME not runnable here; using system java at $JAVA_HOME"
+  fi
+fi
+if [ -z "${JAVA_HOME:-}" ] || [ ! -x "${JAVA_HOME}/bin/java" ]; then
+  echo "ERROR: no runnable java found (JAVA_HOME='${JAVA_HOME:-<unset>}', none on PATH). See job_howde.sge."
+  exit 1
+fi
+JAVA_VER="$("${JAVA_HOME}/bin/java" -version 2>&1 | head -1)"
+echo "java      : $JAVA_VER"
+case "$JAVA_VER" in
+  *\"17*|*\"21*) ;;
+  *) echo "ERROR: Spark 4.2 needs JDK 17 or 21; this is '$JAVA_VER'."; exit 1 ;;
+esac
+
+export SPARK_MASTER="local[${NSLOTS:-1}]"
+export SPARK_DRIVER_MEM="${SPARK_DRIVER_MEM:-16g}"
+
+if [ ! -s output/stops.csv ] || [ ! -s output/stop_places.parquet ]; then
+  echo "ERROR: output/stops.csv and output/stop_places.parquet are both required."
+  exit 1
+fi
+
+for f in $F_LIST; do
+  echo
+  echo "=== 03_howde.py — f_hours_H = $f  (outputs suffixed _fH$f) ==="
+  .venv-ed/bin/python code/03_howde.py --f-hours-h "$f" --out-suffix "_fH$f"
+done
+
+echo
+echo "finished  : $(date)"
+echo "coverage per threshold:  grep -E 'f_hours_H =|users with a' logs/ed-howde-sweep.o${JOB_ID:-?}"
